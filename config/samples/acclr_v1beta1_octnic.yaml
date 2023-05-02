@@ -1,0 +1,12 @@
+apiVersion: acclr.github.com/v1beta1
+kind: OctNic
+metadata:
+  labels:
+    app.kubernetes.io/name: octnic
+    app.kubernetes.io/instance: octnic-sample
+    app.kubernetes.io/part-of: octnic
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: octnic
+  name: octnic-sample
+spec:
+  # TODO(user): Add fields here
