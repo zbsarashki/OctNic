@@ -52,7 +52,7 @@ rules:
 - apiGroups:
   - acclr.github.com
   resources:
-  - octnicupdaters
+  - octnics
   verbs:
   - create
   - delete
@@ -64,13 +64,13 @@ rules:
 - apiGroups:
   - acclr.github.com
   resources:
-  - octnicupdaters/finalizers
+  - octnics/finalizers
   verbs:
   - update
 - apiGroups:
   - acclr.github.com
   resources:
-  - octnicupdaters/status
+  - octnics/status
   verbs:
   - get
   - patch

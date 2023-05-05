@@ -33,14 +33,16 @@ spec:
               acclr:
                 type: string
               fwimage:
-                description: The SDK version refers to runtime FW and Rootfs Versions on the OctNic. This SDK version is used as a TAG to identify the tools update image when updating the device's FW and rootfs
+                description: FwImage refers to the runtime FW and Rootfs, FwTag refers to the SDK version of the above.
+                type: string
+              fwtag:
                 type: string
               nodename:
                 type: string
               numvfs:
                 type: string
               pciAddr:
-                description: Device configuration
+                description: 'Device configuration TODO: Change PciAddr to string array to hold PCI devices on a given node.'
                 type: string
               resourceName:
                 description: 'Pass resource names and their mappings through CRD Syntax: resourcename: - "marvell_sriov_net_vamp#0" - "marvell_sriov_net_rmp#8-15" - "marvell_sriov_net_dip#20-21" - "marvell_sriov_net_dpp#32,36-37,40-47"'
@@ -71,4 +73,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

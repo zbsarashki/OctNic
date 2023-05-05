@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: f95o-sriovdp
+  name: f105o-sriovdp
   #namespace: kube-system
   #namespace: tbcntrl-system
   namespace: default
   labels:
     tier: node
-    app: f95o-sriovdp
+    app: f105o-sriovdp
 spec:
   selector:
     matchLabels:
-      name: f95o-sriovdp
+      name: f105o-sriovdp
   template:
     metadata:
       labels:
-        name: f95o-sriovdp
+        name: f105o-sriovdp
         tier: node
-        app: f95o-sriovdp
+        app: f105o-sriovdp
     spec:
       affinity:
           nodeAffinity:
@@ -27,7 +27,7 @@ spec:
                 - key: marvell.com/inline_acclr_present
                   operator: In
                   values:
-                  - "true"
+                  - "fw_initialized"
           podAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
@@ -44,22 +44,22 @@ spec:
       - key: node-role.kubernetes.io/master
         operator: Exists
         effect: NoSchedule
-      serviceAccountName: f95o-sriov-device-plugin
+      serviceAccountName: oct-sriov-device-plugin
       imagePullSecrets:
         - name: local-registry
       containers:
-      - name: f95o-sriovdp-ctr
+      - name: f105o-sriovdp-ctr
         image: registry.local:9001/ghcr.io/k8snetworkplumbingwg/sriov-network-device-plugin:v3.3.2
         imagePullPolicy: IfNotPresent
-        #command: ["/bin/sh"]
-        #args:
-        #- "-c"
-        #- "--"
-        #- >
-        #  sleep infinity;
+        command: ["/bin/sh"]
         args:
-        - --log-dir=sriovdp
-        - --log-level=10
+        - "-c"
+        - "--"
+        - >
+          sleep infinity;
+        #args:
+        #- --log-dir=sriovdp
+        #- --log-level=10
         securityContext:
           privileged: true
         resources:

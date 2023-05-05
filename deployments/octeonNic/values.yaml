@@ -1,11 +1,11 @@
-octnicupdater:
+octnic:
   enabled: true
   #repository: docker.io
   #image: centos/tools
   #version: latest
   repository: registry.local:9001
   image: staging/octnic
-  version: sdk11.23.02
+  version: sdk11.23.03
   imagePullPolicy: IfNotPresent
   imagePullSecrets: ["local-registry"]
   priorityClassName: system-node-critical

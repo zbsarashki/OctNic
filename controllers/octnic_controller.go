@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	//metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
@@ -50,8 +51,110 @@ var DRIVER_DAEMON = "DRIVER_DAEMON"
 var MONITR_DAEMON = "MONITR_DAEMON"
 var PLUGIN_DAEMON = "PLUGIN_DAEMON"
 
-func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicReconciler) error {
-	fmt.Printf("update_pod_create\n")
+var MRVL_LABEL_KEY = "marvell.com/inline_acclr_present"
+
+func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
+	r *OctNicReconciler) error {
+
+	/* Is there an instance of update tools on the node */
+	dPod := &corev1.PodList{}
+	r.List(ctx, dPod, client.MatchingLabels{"app": mctx.Spec.Acclr + "-dev-update"},
+		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName},
+	)
+	if len(dPod.Items) != 0 {
+		return nil
+	}
+
+	nNodes := &corev1.NodeList{}
+	node := corev1.Node{}
+	err := r.Client.List(ctx, nNodes, []client.ListOption{
+		client.MatchingLabels{MRVL_LABEL_KEY: "true"},
+	}...)
+	for _, x := range nNodes.Items {
+		if x.Name == mctx.Spec.NodeName {
+			node = x
+			break
+		}
+	}
+	if node.Name != mctx.Spec.NodeName {
+		return nil
+	}
+	fmt.Printf("Updating Node: %s\n", node.Name)
+
+	// Label node that we are initializing the device
+	node.Labels["marvell.com/inline_acclr_present"] = "initializing_fw"
+	err = r.Update(ctx, &node)
+	if err != nil {
+		fmt.Printf("Failed to relabel %s: %s\n", node.Name, err)
+		return err
+	}
+
+	// TODO: If device is managed by a driver, unbind it from the update tools
+	// and bind it upon successfull update. This is needed for multi device support.
+
+	p := corev1.Pod{}
+	byf, err := ioutil.ReadFile("/manifests/dev-update/" + mctx.Spec.Acclr + "-update.yaml")
+	if err != nil {
+		fmt.Printf("Manifests not found: %s\n", err)
+		return err
+	}
+
+	reg, _ := regexp.Compile(`image: FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("image: "+mctx.Spec.FwImage+":"+mctx.Spec.FwTag))
+	reg, _ = regexp.Compile(`nodeName: FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("nodeName: "+mctx.Spec.NodeName))
+	reg, _ = regexp.Compile(`NAME_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte(mctx.Spec.NodeName))
+	reg, _ = regexp.Compile(`value: PCIADDR_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.PciAddr))
+
+	err = yamlutil.Unmarshal(byf, &p)
+	if err != nil {
+		fmt.Printf("%#v\n", p)
+	}
+	err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
+	if err != nil {
+		fmt.Printf("Failed to set controller reference: %s\n", err)
+		return err
+	}
+
+	// Lable driver pod with inline_mrvl_acclr_driver_ready=true
+	err = r.List(ctx, dPod,
+		client.MatchingLabels{"inline_mrvl_acclr_driver_ready": "true"},
+		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName})
+	if err != nil {
+		fmt.Printf("Driver Pod does not exist: %s\n", err)
+	}
+
+	if len(dPod.Items) == 1 {
+		fmt.Printf("Update Pod: update Driver Pod\n")
+		dPod.Items[0].Labels["inline_mrvl_acclr_driver_ready"] = "false"
+		err := r.Update(ctx, &dPod.Items[0])
+		if err != nil {
+			fmt.Printf("Failed to update driver pod: %s\n", err)
+			return err
+		}
+	}
+
+	/* If validate pod is running, delete it. */
+	r.List(ctx, dPod,
+		client.MatchingLabels{"app": mctx.Spec.Acclr + "-drv-validate"},
+		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName})
+
+	if len(dPod.Items) == 1 {
+		fmt.Printf("Update Pod: delete Validation Pod\n")
+		err = r.Delete(ctx, &dPod.Items[0])
+		if err != nil {
+			return err
+		}
+	}
+
+	err = r.Create(ctx, &p)
+	if err != nil {
+		fmt.Printf("Failed to create update pod: %s\n", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -60,29 +163,42 @@ func update_pod_check(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicR
 	updPods := &corev1.PodList{}
 	r.List(ctx, updPods, client.MatchingLabels{"app": mctx.Spec.Acclr + "-dev-update"})
 	for _, s := range updPods.Items {
-		dPod := &corev1.PodList{}
 		if s.Status.Phase == "Succeeded" {
-			r.List(ctx, dPod,
-				client.MatchingLabels{"inline_mrvl_acclr_driver_ready": "Maintenance"},
-				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
-			if len(dPod.Items) == 1 {
-				/* Restart driver pod */
-				dPod.Items[0].Labels["inline_mrvl_acclr_driver_ready"] = "false"
-				err := r.Update(ctx, &dPod.Items[0])
-				if err != nil {
-					fmt.Printf("Failed to Delete%s: %s\n", dPod.Items[0].Name, err)
-					return err
+
+			nNodes := &corev1.NodeList{}
+			node := corev1.Node{}
+			r.Client.List(ctx, nNodes, []client.ListOption{
+				client.MatchingLabels{MRVL_LABEL_KEY: "initializing_fw"},
+			}...)
+			for _, x := range nNodes.Items {
+				if x.Name == s.Spec.NodeName {
+					node = x
+					break
 				}
 			}
+			if node.Name != s.Spec.NodeName {
+				fmt.Printf("Update Failed on: %s %s, %s\n", node.Name, s.Spec.NodeName, mctx.Spec.PciAddr)
+				return nil
+			}
+
+			node.Labels["marvell.com/inline_acclr_present"] = "fw_initialized"
+			err := r.Update(ctx, &node)
+			if err != nil {
+				fmt.Printf("Failed to relabel %s: %s\n", node.Name, err)
+				return err
+			}
+
+			err = r.Delete(ctx, &s)
+			if err != nil {
+				fmt.Printf("Failed to delete pod %s: %s\n", s.Name, err)
+				return err
+			}
+		} else if s.Status.Phase == "Failed" {
 			err := r.Delete(ctx, &s)
 			if err != nil {
 				fmt.Printf("Failed to delete pod %s: %s\n", s.Name, err)
 				return err
 			}
-			/*
-				TODO: Label node
-				inline_accler_marvell_fw_initialized = true
-			*/
 		}
 	}
 	return nil
@@ -159,7 +275,6 @@ func setup_validate_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r
 				client.MatchingLabels{"app": match_labels},
 				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
 			if len(valPods.Items) == 0 {
-				//fmt.Printf("170 driver Pod %s %s @ %s \n", s.Name, s.Status.Phase, s.Spec.NodeName)
 				fmt.Printf("Start validator Pod\n")
 				p := corev1.Pod{}
 				byf, err := ioutil.ReadFile(podManifest)
@@ -173,13 +288,13 @@ func setup_validate_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r
 				byf = reg.ReplaceAll(byf, []byte(s.Spec.NodeName))
 				/* Device Configuration */
 				/*
-				 */
-				fmt.Printf("++++++++++++++++++++\n")
-				fmt.Printf("numvfs: %s\n", mctx.Spec.NumVfs)
-				fmt.Printf("pciAddr: %s\n", mctx.Spec.PciAddr)
-				fmt.Printf("prefix: %s\n", mctx.Spec.ResourcePrefix)
-				fmt.Printf("prefix: %s\n", strings.Join(mctx.Spec.ResourceName[:], ","))
-				fmt.Printf("--------------------\n")
+					fmt.Printf("++++++++++++++++++++\n")
+					fmt.Printf("numvfs: %s\n", mctx.Spec.NumVfs)
+					fmt.Printf("pciAddr: %s\n", mctx.Spec.PciAddr)
+					fmt.Printf("prefix: %s\n", mctx.Spec.ResourcePrefix)
+					fmt.Printf("prefix: %s\n", strings.Join(mctx.Spec.ResourceName[:], ","))
+					fmt.Printf("--------------------\n")
+				*/
 				reg, _ = regexp.Compile(`value: NUMVFS_FILLED_BY_OPERATOR`)
 				byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.NumVfs))
 				reg, _ = regexp.Compile(`value: PCIADDR_FILLED_BY_OPERATOR`)
@@ -248,12 +363,12 @@ func daemonset_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicR
 			return err
 		}
 	}
-	return err
+	return nil
 }
 
-//+kubebuilder:rbac:groups=acclr.github.com,resources=octnicupdaters,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=acclr.github.com,resources=octnicupdaters/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=acclr.github.com,resources=octnicupdaters/finalizers,verbs=update
+//+kubebuilder:rbac:groups=acclr.github.com,resources=octnics,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=acclr.github.com,resources=octnics/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=acclr.github.com,resources=octnics/finalizers,verbs=update
 
 //+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -272,6 +387,7 @@ func daemonset_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicR
 func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
+	//fmt.Printf("--> Reconcile reached\n")
 	mctx := &acclrv1beta1.OctNic{}
 	if err := r.Get(ctx, req.NamespacedName, mctx); err != nil {
 		fmt.Printf("unable to fetch UpdateJob: %s\n", err)

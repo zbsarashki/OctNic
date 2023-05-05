@@ -32,6 +32,8 @@ type OctNicSpec struct {
 	NodeName string `json:"nodename,omitempty"`
 
 	// Device configuration
+	// TODO:
+	// Change PciAddr to string array to hold PCI devices on a given node.
 	PciAddr string `json:"pciAddr,omitempty"`
 	NumVfs  string `json:"numvfs,omitempty"`
 	/*
@@ -46,11 +48,17 @@ type OctNicSpec struct {
 	ResourceName   []string `json:"resourceName,omitempty"`
 	ResourcePrefix string   `json:"resourcePrefix,omitempty"`
 
-	// The SDK version refers to runtime FW and Rootfs
-	// Versions on the OctNic. This SDK version is used
-	// as a TAG to identify the tools update image when
-	// updating the device's FW and rootfs
-	SDKVersion string `json:"fwimage,omitempty"`
+	// FwImage refers to the runtime FW and Rootfs,
+	// FwTag refers to the SDK version of the above.
+	// These are used by the UpdatePod/ToolsImage to
+	// Flash the MMC.
+	// Ideally the ToolsImage should query the device
+	// for the runtime versions (and configuration) first,
+	// and update the device if there is a mismatch between
+	// the requested versions (FwImage:FwTag) and what is
+	// running on the card.
+	FwImage string `json:"fwimage,omitempty"`
+	FwTag   string `json:"fwtag,omitempty"`
 }
 
 type OctNicOperationState string

@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: f105o-dev-update-NAME_FILLED_BY_OPERATOR
+  namespace: default
+  labels:
+    app: "f105o-dev-update"
+spec:
+
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: marvell.com/inline_acclr_present
+            operator: In
+            values:
+            - "initializing_fw"
+  nodeName: FILLED_BY_OPERATOR
+  restartPolicy: Never
+  containers:
+  - name: f105o-dev-update-ctr
+    #image: marvellocteon/docker_rootfs_update:sdk11.23.02
+    image: FILLED_BY_OPERATOR
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      privileged: true
+    command: ["/octep_fw_cmd.sh"]
+#    command: [ "/bin/bash" ]
+#    args:
+#    - "-c"
+#    - "--"
+#    - >
+#       sleep 120;
+#       exit 0;
+#       /mrvl-remote-reset;
+
+# TODO: driver and device validaton
+
+    env:
+    - name: device_pciAddr
+      value: PCIADDR_FILLED_BY_OPERATOR
+    volumeMounts:
+    - name: dev-mem0
+      mountPath: /dev/mem
+      readOnly: false
+    - name: class-dev
+      mountPath: /sys/dev
+      readOnly: false
+    - name: class-devices
+      mountPath: /sys/devices
+      readOnly: false
+    - name: class-bus
+      mountPath: /sys/bus
+      readOnly: false
+  volumes:
+  - hostPath:
+      path: "/dev/mem"
+    name: dev-mem0
+  - name: class-dev
+    hostPath:
+      path: /sys/dev
+  - name: class-devices
+    hostPath:
+      path: /sys/devices
+  - name: class-bus
+    hostPath:
+      path: /sys/bus
