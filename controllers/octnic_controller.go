@@ -52,6 +52,7 @@ var MONITR_DAEMON = "MONITR_DAEMON"
 var PLUGIN_DAEMON = "PLUGIN_DAEMON"
 
 var MRVL_LABEL_KEY = "marvell.com/inline_acclr_present"
+var NODE_LABEL_NAME = "kubernetes.io/hostname"
 
 func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
 	r *OctNicReconciler) error {
@@ -66,26 +67,22 @@ func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
 	}
 
 	nNodes := &corev1.NodeList{}
-	node := corev1.Node{}
-	err := r.Client.List(ctx, nNodes, []client.ListOption{
-		client.MatchingLabels{MRVL_LABEL_KEY: "true"},
-	}...)
-	for _, x := range nNodes.Items {
-		if x.Name == mctx.Spec.NodeName {
-			node = x
-			break
-		}
-	}
-	if node.Name != mctx.Spec.NodeName {
+	r.Client.List(ctx, nNodes, []client.ListOption{
+		client.MatchingLabels{NODE_LABEL_NAME: mctx.Spec.NodeName},
+		}...)
+
+	if len(nNodes.Items) != 0 {
+	    if nNodes.Items[0].Labels[MRVL_LABEL_KEY] != "true" {
 		return nil
+	    }
 	}
-	fmt.Printf("Updating Node: %s\n", node.Name)
+	fmt.Printf("Updating Node: %s\n", nNodes.Items[0].Name)
 
 	// Label node that we are initializing the device
-	node.Labels["marvell.com/inline_acclr_present"] = "initializing_fw"
-	err = r.Update(ctx, &node)
+	nNodes.Items[0].Labels["marvell.com/inline_acclr_present"] = "initializing_fw"
+	err := r.Update(ctx, &nNodes.Items[0])
 	if err != nil {
-		fmt.Printf("Failed to relabel %s: %s\n", node.Name, err)
+		fmt.Printf("Failed to relabel %s: %s\n", nNodes.Items[0].Name, err)
 		return err
 	}
 
@@ -110,7 +107,8 @@ func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
 
 	err = yamlutil.Unmarshal(byf, &p)
 	if err != nil {
-		fmt.Printf("%#v\n", p)
+		fmt.Printf("%s\n", err)
+		return err
 	}
 	err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
 	if err != nil {
@@ -169,6 +167,7 @@ func update_pod_check(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicR
 			node := corev1.Node{}
 			r.Client.List(ctx, nNodes, []client.ListOption{
 				client.MatchingLabels{MRVL_LABEL_KEY: "initializing_fw"},
+				client.MatchingLabels{NODE_LABEL_NAME: mctx.Spec.NodeName},
 			}...)
 			for _, x := range nNodes.Items {
 				if x.Name == s.Spec.NodeName {
@@ -243,7 +242,10 @@ func setup_validate_pod_check(mctx *acclrv1beta1.OctNic, ctx context.Context, r 
 					fmt.Printf("Failed to delete pod: %s\n", err)
 				}
 			}
+			// TODO:
 			// Delete the validation pod
+			// Delete driver pod on the node
+			// Mark device on the node as failed after a 2 attempts?
 			err = r.Delete(ctx, &s)
 			if err != nil {
 				fmt.Printf("Failed to delete pod: %s\n", err)
@@ -265,17 +267,40 @@ func setup_validate_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r
 		fmt.Printf("Error reading Podlist: %s\n", err)
 		return err
 	}
+
 	match_labels = mctx.Spec.Acclr + "-drv-validate"
 	podManifest := "/manifests/drv-daemon-validate/" + mctx.Spec.Acclr + "-drv-validate.yaml"
 
 	for _, s := range driverPods.Items {
+		
 		if s.Status.Phase == "Running" {
+			updatePods := &corev1.PodList{}
+			err = r.List(ctx, updatePods,
+				client.MatchingLabels{"app": mctx.Spec.Acclr + "dev-update"},
+				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
+
+			if len(updatePods.Items) != 0 {
+			    continue			    
+			}
+
+			nNodes := &corev1.NodeList{}
+				r.Client.List(ctx, nNodes, []client.ListOption{
+				    client.MatchingLabels{"kubernetes.io/hostname": mctx.Spec.NodeName},
+				}...)
+
+			if len(nNodes.Items) != 0 {
+			    if nNodes.Items[0].Labels[MRVL_LABEL_KEY] == "initializing_fw" {
+				 continue			    
+			    }
+			}
+			    
 			valPods := &corev1.PodList{}
 			r.List(ctx, valPods,
 				client.MatchingLabels{"app": match_labels},
 				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
+
 			if len(valPods.Items) == 0 {
-				fmt.Printf("Start validator Pod\n")
+				fmt.Printf("Start validator Pod %d\n", len(valPods.Items))
 				p := corev1.Pod{}
 				byf, err := ioutil.ReadFile(podManifest)
 				if err != nil {
@@ -387,12 +412,32 @@ func daemonset_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicR
 func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
-	//fmt.Printf("--> Reconcile reached\n")
+	fmt.Printf("--> Reconcile reached\n")
 	mctx := &acclrv1beta1.OctNic{}
 	if err := r.Get(ctx, req.NamespacedName, mctx); err != nil {
 		fmt.Printf("unable to fetch UpdateJob: %s\n", err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// TODO:
+	// The remote utlitites included in the tools image must
+	// query the device for the sofware versions and reflash
+	// if device's fw version differs from the CRD requested
+	// version. This is currently not supported by the remote 
+	// utlitities and, therefore, the update stage will query
+	// the nodes's label.
+	
+	err = update_pod_create(mctx, ctx, r)
+	if err != nil {
+		fmt.Printf("Failed to create update PoD: %s\n", err)
+		return ctrl.Result{}, nil
+	}
+	err = update_pod_check(mctx, ctx, r)
+	if err != nil {
+		fmt.Printf("Failed update PoD: %s\n", err)
+		return ctrl.Result{}, nil
+	}
+
 
 	/* Start driver daemonSet if not already started */
 	err := daemonset_create(mctx, ctx, r, DRIVER_DAEMON)
@@ -401,14 +446,7 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	/* Start device plugin daemonSet if not already started */
-	err = daemonset_create(mctx, ctx, r, PLUGIN_DAEMON)
-	if err != nil {
-		fmt.Printf("Failed to create daemonset: %s\n", err)
-		return ctrl.Result{}, nil
-	}
-
-	/* Start Driver validation Pods */
+	// Driver Validation and device setup
 	err = setup_validate_pod_create(mctx, ctx, r)
 	if err != nil {
 		fmt.Printf("Failed to create setup_validate: %s\n", err)
@@ -422,16 +460,13 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	err = update_pod_create(mctx, ctx, r)
+	// Device plugin
+	err = daemonset_create(mctx, ctx, r, PLUGIN_DAEMON)
 	if err != nil {
-		fmt.Printf("Failed to create update PoD: %s\n", err)
+		fmt.Printf("Failed to create daemonset: %s\n", err)
 		return ctrl.Result{}, nil
 	}
-	err = update_pod_check(mctx, ctx, r)
-	if err != nil {
-		fmt.Printf("Failed update PoD: %s\n", err)
-		return ctrl.Result{}, nil
-	}
+
 
 	return ctrl.Result{}, nil
 }
