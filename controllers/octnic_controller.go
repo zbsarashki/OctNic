@@ -69,12 +69,12 @@ func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
 	nNodes := &corev1.NodeList{}
 	r.Client.List(ctx, nNodes, []client.ListOption{
 		client.MatchingLabels{NODE_LABEL_NAME: mctx.Spec.NodeName},
-		}...)
+	}...)
 
 	if len(nNodes.Items) != 0 {
-	    if nNodes.Items[0].Labels[MRVL_LABEL_KEY] != "true" {
-		return nil
-	    }
+		if nNodes.Items[0].Labels[MRVL_LABEL_KEY] != "true" {
+			return nil
+		}
 	}
 	fmt.Printf("Updating Node: %s\n", nNodes.Items[0].Name)
 
@@ -272,7 +272,7 @@ func setup_validate_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r
 	podManifest := "/manifests/drv-daemon-validate/" + mctx.Spec.Acclr + "-drv-validate.yaml"
 
 	for _, s := range driverPods.Items {
-		
+
 		if s.Status.Phase == "Running" {
 			updatePods := &corev1.PodList{}
 			err = r.List(ctx, updatePods,
@@ -280,20 +280,20 @@ func setup_validate_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r
 				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
 
 			if len(updatePods.Items) != 0 {
-			    continue			    
+				continue
 			}
 
 			nNodes := &corev1.NodeList{}
-				r.Client.List(ctx, nNodes, []client.ListOption{
-				    client.MatchingLabels{"kubernetes.io/hostname": mctx.Spec.NodeName},
-				}...)
+			r.Client.List(ctx, nNodes, []client.ListOption{
+				client.MatchingLabels{"kubernetes.io/hostname": mctx.Spec.NodeName},
+			}...)
 
 			if len(nNodes.Items) != 0 {
-			    if nNodes.Items[0].Labels[MRVL_LABEL_KEY] == "initializing_fw" {
-				 continue			    
-			    }
+				if nNodes.Items[0].Labels[MRVL_LABEL_KEY] == "initializing_fw" {
+					continue
+				}
 			}
-			    
+
 			valPods := &corev1.PodList{}
 			r.List(ctx, valPods,
 				client.MatchingLabels{"app": match_labels},
@@ -423,11 +423,11 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// The remote utlitites included in the tools image must
 	// query the device for the sofware versions and reflash
 	// if device's fw version differs from the CRD requested
-	// version. This is currently not supported by the remote 
+	// version. This is currently not supported by the remote
 	// utlitities and, therefore, the update stage will query
 	// the nodes's label.
-	
-	err = update_pod_create(mctx, ctx, r)
+
+	err := update_pod_create(mctx, ctx, r)
 	if err != nil {
 		fmt.Printf("Failed to create update PoD: %s\n", err)
 		return ctrl.Result{}, nil
@@ -438,9 +438,8 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-
-	/* Start driver daemonSet if not already started */
-	err := daemonset_create(mctx, ctx, r, DRIVER_DAEMON)
+	// Start driver daemonSet if not already started
+	err = daemonset_create(mctx, ctx, r, DRIVER_DAEMON)
 	if err != nil {
 		fmt.Printf("Failed to create daemonset: %s\n", err)
 		return ctrl.Result{}, nil
@@ -453,7 +452,7 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	/* Check Driver Validation Pods */
+	// Check Driver Validation Pods
 	err = setup_validate_pod_check(mctx, ctx, r)
 	if err != nil {
 		fmt.Printf("Failed setup_validate PoD: %s\n", err)
@@ -466,7 +465,6 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		fmt.Printf("Failed to create daemonset: %s\n", err)
 		return ctrl.Result{}, nil
 	}
-
 
 	return ctrl.Result{}, nil
 }
