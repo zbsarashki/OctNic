@@ -28,12 +28,13 @@ type OctNicSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	Acclr    string `json:"acclr,omitempty"`
-	NodeName string `json:"nodename,omitempty"`
+	NodeName     string        `json:"nodename,omitempty"`
+	InlineAcclrs []InlineAcclr `json:"inlineAcclrs,omitempty"`
+}
 
+type InlineAcclr struct {
+	Acclr string `json:"acclr,omitempty"`
 	// Device configuration
-	// TODO:
-	// Change PciAddr to string array to hold PCI devices on a given node.
 	PciAddr string `json:"pciAddr,omitempty"`
 	NumVfs  string `json:"numvfs,omitempty"`
 	/*
@@ -44,6 +45,9 @@ type OctNicSpec struct {
 		  - "marvell_sriov_net_rmp#8-15"
 		  - "marvell_sriov_net_dip#20-21"
 		  - "marvell_sriov_net_dpp#32,36-37,40-47"
+		Resultant resource names will be appended
+		to by their root's pci address, i.e.:
+		 - "marvell_sriov_net_vamp_af_00_0"
 	*/
 	ResourceName   []string `json:"resourceName,omitempty"`
 	ResourcePrefix string   `json:"resourcePrefix,omitempty"`

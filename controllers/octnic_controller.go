@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"regexp"
 	"strings"
@@ -39,6 +40,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	acclrv1beta1 "github.com/zbsarashki/OctNic/api/v1beta1"
+
+	// To be removed
+	"net/http"
 )
 
 // OctNicReconciler reconciles a OctNic object
@@ -54,56 +58,291 @@ var PLUGIN_DAEMON = "PLUGIN_DAEMON"
 var MRVL_LABEL_KEY = "marvell.com/inline_acclr_present"
 var NODE_LABEL_NAME = "kubernetes.io/hostname"
 
-func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
-	r *OctNicReconciler) error {
+type stateControl struct {
+	drvState bool
+	dpState bool
 
-	/* Is there an instance of update tools on the node */
-	dPod := &corev1.PodList{}
-	r.List(ctx, dPod, client.MatchingLabels{"app": mctx.Spec.Acclr + "-dev-update"},
-		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName},
-	)
-	if len(dPod.Items) != 0 {
+	updState  bool
+	monState bool
+	confState bool
+
+	uPod corev1.Pod
+	mPod corev1.Pod
+	cPod corev1.Pod
+
+	drvSet appsv1.DaemonSet
+	dpSet appsv1.DaemonSet
+
+	ctx context.Context
+	r *OctNicReconciler
+	mctx *acclrv1beta1.OctNic
+
+	currentDevState DevState
+	desiredDevState DevState
+}
+
+type DevState struct {
+	PciAddr  string
+	Numvfs   string
+	FwImage  string
+	FwTag    string
+	Status   string
+	PFdriver string
+}
+
+// The remote utlitites included in the tools image must
+// query the device for the sofware versions and reflash
+// if device's fw version differs from the CRD requested
+// version. This is currently not supported by the remote
+// utlitities.
+func (Z stateControl) s0_dev_state_check(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) error {
+
+	fmt.Printf("-----> s0_dev_state_check\n")
+	rvl := DevState{}
+
+	if Z.monState == false {
+		// Monitor Pod does not exist
+		podManifest := "/manifests/dev-monitor/" + mctx.Spec.InlineAcclrs[0].Acclr + "-dev-monitor.yaml"
+		byf, err := ioutil.ReadFile(podManifest)
+		if err != nil {
+			fmt.Printf("Manifest %s not found: %s\n", podManifest, err)
+			Z.currentDevState = rvl
+			return err
+		}
+
+		reg, _ := regexp.Compile(`NAME_FILLED_BY_OPERATOR`)
+		byf = reg.ReplaceAll(byf, []byte(mctx.Spec.NodeName))
+		reg, _ = regexp.Compile(`nodeName: FILLED_BY_OPERATOR`)
+		byf = reg.ReplaceAll(byf, []byte("nodeName: "+mctx.Spec.NodeName))
+
+		var pciAddr []string
+		for _, e := range mctx.Spec.InlineAcclrs {
+			pciAddr = append(pciAddr, e.PciAddr)
+		}
+
+		reg, _ = regexp.Compile(`value: PCIADDR_FILLED_BY_OPERATOR`)
+		byf = reg.ReplaceAll(byf, []byte("value: "+strings.Join(pciAddr[:], ",")))
+
+		p := corev1.Pod{}
+		yamlutil.Unmarshal(byf, &p)
+
+		err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
+		if err != nil {
+			fmt.Printf("Failed to set controller reference: %s\n", err)
+			return nil
+		}
+
+		err = r.Create(ctx, &p)
+		if err != nil {
+			fmt.Printf("Failed to create pod: %s\n", err)
+			return nil
+		}
+		fmt.Printf("@ %+v\n", pciAddr[:])
 		return nil
 	}
 
-	nNodes := &corev1.NodeList{}
-	r.Client.List(ctx, nNodes, []client.ListOption{
-		client.MatchingLabels{NODE_LABEL_NAME: mctx.Spec.NodeName},
-	}...)
-
-	if len(nNodes.Items) != 0 {
-		if nNodes.Items[0].Labels[MRVL_LABEL_KEY] != "true" {
-			return nil
-		}
+	//for _, e := range mctx.Spec.InlineAcclrs {
+	e := mctx.Spec.InlineAcclrs[0]
+	if Z.mPod.Status.Phase != "Running" {
+		// There is at most one monitor pod per node
+		// So it is either pending or has crashed
+		//fmt.Printf("%s: %s == %s\n",
+		//		mPs.Items[0].Status.Phase,
+		//		mPs.Items[0].Spec.NodeName,
+		//		mctx.Spec.NodeName)
+		return nil
 	}
-	fmt.Printf("Updating Node: %s\n", nNodes.Items[0].Name)
 
-	// Label node that we are initializing the device
-	nNodes.Items[0].Labels["marvell.com/inline_acclr_present"] = "initializing_fw"
-	err := r.Update(ctx, &nNodes.Items[0])
+	// TODO: This part needs to change
+	getUrl := "http://" + Z.mPod.Status.PodIP + ":4004/" + e.PciAddr + "/status.yml"
+	resp, err := http.Get(getUrl)
 	if err != nil {
-		fmt.Printf("Failed to relabel %s: %s\n", nNodes.Items[0].Name, err)
+		fmt.Printf("http.Get Failed: %s\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	err = yamlutil.Unmarshal(data, &rvl)
+	if err != nil {
+		fmt.Printf("Unmarshal Failed: %s\n", err)
+		return nil
+	}
+	fmt.Printf("-----> %d, %+v\n", len(data), rvl)
+	//}
+
+	Z.currentDevState = rvl
+	return nil
+}
+
+func (Z *stateControl) s1_device_remove(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) error {
+	// We are removing an initialized device.
+	fmt.Printf("s1_device_remove: Re/Start validator Pod\n")
+
+	if Z.updState == true {
+		fmt.Printf("Current update running Return nil from remove\n")
+		return nil
+	}
+
+	unbind_pci_address := mctx.Spec.InlineAcclrs[0].PciAddr
+	if unbind_pci_address != Z.currentDevState.PciAddr {
+		fmt.Printf("Rejecting unexpected device remove attempt!\n")
+		return nil
+	}
+
+	if Z.confState == true {
+		if Z.cPod.Status.Phase == "Succeeded" {
+			// Delete it.
+			err := r.Delete(ctx, &Z.cPod)
+			return err
+		}
+		return nil
+	}
+
+	// TODO:
+	// Handle case when the pod is pending or running
+
+	fmt.Printf("Re/Start validator Pod\n")
+
+	podManifest := "/manifests/drv-daemon-validate/" + mctx.Spec.InlineAcclrs[0].Acclr + "-drv-validate.yaml"
+	p := corev1.Pod{}
+
+	byf, err := ioutil.ReadFile(podManifest)
+	if err != nil {
+		fmt.Printf("Manifests not found: %s\n", err)
 		return err
 	}
 
-	// TODO: If device is managed by a driver, unbind it from the update tools
-	// and bind it upon successfull update. This is needed for multi device support.
+	reg, _ := regexp.Compile(`NAME_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte(mctx.Spec.NodeName))
+	reg, _ = regexp.Compile(`nodeName: FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("nodeName: "+mctx.Spec.NodeName))
+
+	reg, _ = regexp.Compile(`value: NUMVFS_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].NumVfs))
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].PciAddr))
+
+	// TODO: handle multiple devices
+	// The device configuration must be able to handle multiple devices
+	reg, _ = regexp.Compile(`value: PCIADDR_UNBIND_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+unbind_pci_address))
+
+	//bind_pci_address :=
+	//reg, _ = regexp.Compile(`value: PCIADDR_BIND_FILLED_BY_OPERATOR`)
+	//byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].PciAddr))
+
+	reg, _ = regexp.Compile(`value: PREFIX_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].ResourcePrefix))
+	reg, _ = regexp.Compile(`value: RESOURCENAMES_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+
+		strings.Join(mctx.Spec.InlineAcclrs[0].ResourceName[:], ",")))
+
+	yamlutil.Unmarshal(byf, &p)
+	err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
+	if err != nil {
+		fmt.Printf("Failed to set controller reference: %s\n", err)
+		return err
+	}
+	err = r.Create(ctx, &p)
+	if err != nil {
+		fmt.Printf("Failed to create pod: %s\n", err)
+		return err
+	}
+
+	return nil
+}
+
+func (Z *stateControl) s3_device_add(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) (err error) {
+	fmt.Printf("s3_device_add: Re/Start validator Pod\n")
+
+	if Z.updState == true {
+		fmt.Printf("Current update running Return nil from remove\n")
+		return nil
+	}
+
+	if Z.confState == true {
+		if Z.cPod.Status.Phase == "Succeeded" {
+			// Delete it.
+			err := r.Delete(ctx, &Z.cPod)
+			return err
+		}
+		return nil
+	}
+
+	podManifest := "/manifests/drv-daemon-validate/" + mctx.Spec.InlineAcclrs[0].Acclr + "-drv-validate.yaml"
+	p := corev1.Pod{}
+	byf, err := ioutil.ReadFile(podManifest)
+	if err != nil {
+		fmt.Printf("Manifests not found: %s\n", err)
+		return err
+	}
+
+	reg, _ := regexp.Compile(`NAME_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte(mctx.Spec.NodeName))
+	reg, _ = regexp.Compile(`nodeName: FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("nodeName: "+mctx.Spec.NodeName))
+
+	reg, _ = regexp.Compile(`value: NUMVFS_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].NumVfs))
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].PciAddr))
+
+	// TODO: handle multiple devices
+	// The device configuration must be able to handle multiple devices
+	//unbind_pci_address :=
+	//reg, _ = regexp.Compile(`value: PCIADDR_UNBIND_FILLED_BY_OPERATOR`)
+	//byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].PciAddr))
+
+	//bind_pci_address :=
+	reg, _ = regexp.Compile(`value: PCIADDR_BIND_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].PciAddr))
+
+	reg, _ = regexp.Compile(`value: PREFIX_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].ResourcePrefix))
+	reg, _ = regexp.Compile(`value: RESOURCENAMES_FILLED_BY_OPERATOR`)
+	byf = reg.ReplaceAll(byf, []byte("value: "+
+		strings.Join(mctx.Spec.InlineAcclrs[0].ResourceName[:], ",")))
+
+	yamlutil.Unmarshal(byf, &p)
+	err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
+	if err != nil {
+		fmt.Printf("Failed to set controller reference: %s\n", err)
+		return err
+	}
+	err = r.Create(ctx, &p)
+	if err != nil {
+		fmt.Printf("Failed to create pod: %s\n", err)
+		return err
+	}
+
+	return err
+}
+
+func (Z *stateControl) s1_device_reflash(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) (err error) {
+	fmt.Printf("s1_device_reflash\n")
+
+	if Z.updState == true {
+		if Z.uPod.Status.Phase == "Succeeded" {
+			err := r.Delete(ctx, &Z.cPod)
+			return err
+		}
+		return nil
+	}
 
 	p := corev1.Pod{}
-	byf, err := ioutil.ReadFile("/manifests/dev-update/" + mctx.Spec.Acclr + "-update.yaml")
+	l := mctx.Spec.InlineAcclrs[0].Acclr
+	byf, err := ioutil.ReadFile("/manifests/dev-update/" + l + "-update.yaml")
 	if err != nil {
 		fmt.Printf("Manifests not found: %s\n", err)
 		return err
 	}
 
 	reg, _ := regexp.Compile(`image: FILLED_BY_OPERATOR`)
-	byf = reg.ReplaceAll(byf, []byte("image: "+mctx.Spec.FwImage+":"+mctx.Spec.FwTag))
+	byf = reg.ReplaceAll(byf, []byte("image: "+mctx.Spec.InlineAcclrs[0].FwImage+":"+mctx.Spec.InlineAcclrs[0].FwTag))
 	reg, _ = regexp.Compile(`nodeName: FILLED_BY_OPERATOR`)
 	byf = reg.ReplaceAll(byf, []byte("nodeName: "+mctx.Spec.NodeName))
 	reg, _ = regexp.Compile(`NAME_FILLED_BY_OPERATOR`)
 	byf = reg.ReplaceAll(byf, []byte(mctx.Spec.NodeName))
 	reg, _ = regexp.Compile(`value: PCIADDR_FILLED_BY_OPERATOR`)
-	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.PciAddr))
+	byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.InlineAcclrs[0].PciAddr))
 
 	err = yamlutil.Unmarshal(byf, &p)
 	if err != nil {
@@ -116,277 +355,130 @@ func update_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context,
 		return err
 	}
 
-	// Lable driver pod with inline_mrvl_acclr_driver_ready=true
-	err = r.List(ctx, dPod,
-		client.MatchingLabels{"inline_mrvl_acclr_driver_ready": "true"},
-		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName})
-	if err != nil {
-		fmt.Printf("Driver Pod does not exist: %s\n", err)
-	}
-
-	if len(dPod.Items) == 1 {
-		fmt.Printf("Update Pod: update Driver Pod\n")
-		dPod.Items[0].Labels["inline_mrvl_acclr_driver_ready"] = "false"
-		err := r.Update(ctx, &dPod.Items[0])
-		if err != nil {
-			fmt.Printf("Failed to update driver pod: %s\n", err)
-			return err
-		}
-	}
-
-	/* If validate pod is running, delete it. */
-	r.List(ctx, dPod,
-		client.MatchingLabels{"app": mctx.Spec.Acclr + "-drv-validate"},
-		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName})
-
-	if len(dPod.Items) == 1 {
-		fmt.Printf("Update Pod: delete Validation Pod\n")
-		err = r.Delete(ctx, &dPod.Items[0])
-		if err != nil {
-			return err
-		}
-	}
-
 	err = r.Create(ctx, &p)
 	if err != nil {
-		fmt.Printf("Failed to create update pod: %s\n", err)
+		fmt.Printf("Failed to create pod: %s\n", err)
 		return err
 	}
 
-	return nil
+	return err
 }
 
-func update_pod_check(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicReconciler) error {
-	// Check device update pods
-	updPods := &corev1.PodList{}
-	r.List(ctx, updPods, client.MatchingLabels{"app": mctx.Spec.Acclr + "-dev-update"})
-	for _, s := range updPods.Items {
-		if s.Status.Phase == "Succeeded" {
+func (Z *stateControl) state_check(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) error {
 
-			nNodes := &corev1.NodeList{}
-			node := corev1.Node{}
-			r.Client.List(ctx, nNodes, []client.ListOption{
-				client.MatchingLabels{MRVL_LABEL_KEY: "initializing_fw"},
-				client.MatchingLabels{NODE_LABEL_NAME: mctx.Spec.NodeName},
-			}...)
-			for _, x := range nNodes.Items {
-				if x.Name == s.Spec.NodeName {
-					node = x
-					break
-				}
-			}
-			if node.Name != s.Spec.NodeName {
-				fmt.Printf("Update Failed on: %s %s, %s\n", node.Name, s.Spec.NodeName, mctx.Spec.PciAddr)
-				return nil
-			}
+	fmt.Printf("Kstate_check\n")
 
-			node.Labels["marvell.com/inline_acclr_present"] = "fw_initialized"
-			err := r.Update(ctx, &node)
-			if err != nil {
-				fmt.Printf("Failed to relabel %s: %s\n", node.Name, err)
-				return err
-			}
+	daemSet := appsv1.DaemonSet{}
 
-			err = r.Delete(ctx, &s)
-			if err != nil {
-				fmt.Printf("Failed to delete pod %s: %s\n", s.Name, err)
-				return err
-			}
-		} else if s.Status.Phase == "Failed" {
-			err := r.Delete(ctx, &s)
-			if err != nil {
-				fmt.Printf("Failed to delete pod %s: %s\n", s.Name, err)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func setup_validate_pod_check(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicReconciler) error {
-
-	valPods := &corev1.PodList{}
-	match_labels := mctx.Spec.Acclr + "-drv-validate"
-	r.List(ctx, valPods, client.MatchingLabels{"app": match_labels})
-	for _, s := range valPods.Items {
-		dPod := &corev1.PodList{}
-		if s.Status.Phase == "Succeeded" {
-			r.List(ctx, dPod,
-				client.MatchingLabels{"inline_mrvl_acclr_driver_ready": "false"},
-				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
-			if len(dPod.Items) == 1 {
-				dPod.Items[0].Labels["inline_mrvl_acclr_driver_ready"] = "true"
-				err := r.Update(ctx, &dPod.Items[0])
-				if err != nil {
-					fmt.Printf("Failed to relabel %s: %s\n", s.Name, err)
-					return err
-				}
-			}
-			/* Update OctNicDevice and OctNicStatus */
-		} else if s.Status.Phase == "Failed" {
-			// Delete driver pod
-			r.List(ctx, dPod, client.MatchingLabels{"app": mctx.Spec.Acclr + "-driver"},
-				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
-			err := r.Delete(ctx, &dPod.Items[0])
-			if err != nil {
-				fmt.Printf("Failed to delete pod: %s\n", err)
-				return err
-			}
-			// Delete the device plugin pod
-			r.List(ctx, dPod,
-				client.MatchingLabels{"app": mctx.Spec.Acclr + "-sriovdp"},
-				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
-			if len(dPod.Items) == 1 {
-				err := r.Delete(ctx, &dPod.Items[0])
-				if err != nil {
-					fmt.Printf("Failed to delete pod: %s\n", err)
-				}
-			}
-			// TODO:
-			// Delete the validation pod
-			// Delete driver pod on the node
-			// Mark device on the node as failed after a 2 attempts?
-			err = r.Delete(ctx, &s)
-			if err != nil {
-				fmt.Printf("Failed to delete pod: %s\n", err)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func setup_validate_pod_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicReconciler) error {
-	var err error
-	var match_labels string
-
-	driverPods := &corev1.PodList{}
-	err = r.List(ctx, driverPods,
-		client.MatchingLabels{"inline_mrvl_acclr_driver_ready": "false"})
-	if err != nil {
-		fmt.Printf("Error reading Podlist: %s\n", err)
-		return err
-	}
-
-	match_labels = mctx.Spec.Acclr + "-drv-validate"
-	podManifest := "/manifests/drv-daemon-validate/" + mctx.Spec.Acclr + "-drv-validate.yaml"
-
-	for _, s := range driverPods.Items {
-
-		if s.Status.Phase == "Running" {
-			updatePods := &corev1.PodList{}
-			err = r.List(ctx, updatePods,
-				client.MatchingLabels{"app": mctx.Spec.Acclr + "dev-update"},
-				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
-
-			if len(updatePods.Items) != 0 {
-				continue
-			}
-
-			nNodes := &corev1.NodeList{}
-			r.Client.List(ctx, nNodes, []client.ListOption{
-				client.MatchingLabels{"kubernetes.io/hostname": mctx.Spec.NodeName},
-			}...)
-
-			if len(nNodes.Items) != 0 {
-				if nNodes.Items[0].Labels[MRVL_LABEL_KEY] == "initializing_fw" {
-					continue
-				}
-			}
-
-			valPods := &corev1.PodList{}
-			r.List(ctx, valPods,
-				client.MatchingLabels{"app": match_labels},
-				client.MatchingFields{"spec.nodeName": s.Spec.NodeName})
-
-			if len(valPods.Items) == 0 {
-				fmt.Printf("Start validator Pod %d\n", len(valPods.Items))
-				p := corev1.Pod{}
-				byf, err := ioutil.ReadFile(podManifest)
-				if err != nil {
-					fmt.Printf("Manifests not found: %s\n", err)
-					return err
-				}
-				reg, _ := regexp.Compile(`nodeName: FILLED_BY_OPERATOR`)
-				byf = reg.ReplaceAll(byf, []byte("nodeName: "+s.Spec.NodeName))
-				reg, _ = regexp.Compile(`NAME_FILLED_BY_OPERATOR`)
-				byf = reg.ReplaceAll(byf, []byte(s.Spec.NodeName))
-				/* Device Configuration */
-				/*
-					fmt.Printf("++++++++++++++++++++\n")
-					fmt.Printf("numvfs: %s\n", mctx.Spec.NumVfs)
-					fmt.Printf("pciAddr: %s\n", mctx.Spec.PciAddr)
-					fmt.Printf("prefix: %s\n", mctx.Spec.ResourcePrefix)
-					fmt.Printf("prefix: %s\n", strings.Join(mctx.Spec.ResourceName[:], ","))
-					fmt.Printf("--------------------\n")
-				*/
-				reg, _ = regexp.Compile(`value: NUMVFS_FILLED_BY_OPERATOR`)
-				byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.NumVfs))
-				reg, _ = regexp.Compile(`value: PCIADDR_FILLED_BY_OPERATOR`)
-				byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.PciAddr))
-				reg, _ = regexp.Compile(`value: PREFIX_FILLED_BY_OPERATOR`)
-				byf = reg.ReplaceAll(byf, []byte("value: "+mctx.Spec.ResourcePrefix))
-				reg, _ = regexp.Compile(`value: RESOURCENAMES_FILLED_BY_OPERATOR`)
-				byf = reg.ReplaceAll(byf, []byte("value: "+
-					strings.Join(mctx.Spec.ResourceName[:], ",")))
-
-				yamlutil.Unmarshal(byf, &p)
-				err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
-				if err != nil {
-					fmt.Printf("Failed to set controller reference: %s\n", err)
-					return err
-				}
-				err = r.Create(ctx, &p)
-				if err != nil {
-					fmt.Printf("Failed to create pod: %s\n", err)
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func daemonset_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicReconciler, d string) error {
-
-	var daemonName string
-	var daemonManifest string
-	switch d {
-	case "DRIVER_DAEMON":
-		daemonName = mctx.Spec.Acclr + "-driver"
-		daemonManifest = "/manifests/drv-daemon/" + mctx.Spec.Acclr + "-drv.yaml"
-	case "PLUGIN_DAEMON":
-		daemonName = mctx.Spec.Acclr + "-sriovdp"
-		daemonManifest = "/manifests/dev-plugin/" + mctx.Spec.Acclr + "-sriovdp.yaml"
-	case "MONITR_DAEMON":
-		/* TODO: Implement Monitor */
-		fmt.Printf("Monitor not implemented\n")
-	}
-	/* Start daemonSet */
-	daemSet := &appsv1.DaemonSet{}
+	// Driver daemonset running?
+	daemonName := mctx.Spec.InlineAcclrs[0].Acclr + "-driver"
 	err := r.Get(context.TODO(),
 		types.NamespacedName{Name: daemonName, Namespace: mctx.Namespace},
-		daemSet)
+		&daemSet)
 
 	if errors.IsNotFound(err) {
-		p := appsv1.DaemonSet{}
+		Z.drvState = false
+	} else {
+		Z.drvState = true
+		Z.drvSet = daemSet
+	}
 
-		byf, err := ioutil.ReadFile(daemonManifest)
-		if err != nil {
-			fmt.Printf("Manifests not found: %s\n", err)
-			return err
-		}
-		yamlutil.Unmarshal(byf, &p)
-		err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
-		if err != nil {
-			fmt.Printf("Failed to set controller reference: %s\n", err)
-			return err
-		}
-		err = r.Create(ctx, &p)
-		if err != nil {
-			fmt.Printf("Failed to create pod: %s\n", err)
-			return err
-		}
+	// DevicePlugin daemonset running?
+	daemonName = mctx.Spec.InlineAcclrs[0].Acclr + "-sriovdp"
+	err = r.Get(context.TODO(),
+		types.NamespacedName{Name: daemonName, Namespace: mctx.Namespace},
+		&daemSet)
+
+	if errors.IsNotFound(err) {
+		Z.dpState = false
+	} else {
+		Z.dpState = true
+		Z.dpSet = daemSet
+	}
+
+	// Is monitor Pod running
+	mPs := &corev1.PodList{}
+	l := mctx.Spec.InlineAcclrs[0].Acclr
+	r.List(ctx, mPs, client.MatchingLabels{"app": l + "-dev-monitor"},
+		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName},
+	)
+	if len(mPs.Items) == 0 {
+		Z.monState = false
+	} else {
+		Z.monState = true
+		Z.mPod = mPs.Items[0]
+	}
+
+	// Is reflashPod running?
+	l = mctx.Spec.InlineAcclrs[0].Acclr
+	r.List(ctx, mPs, client.MatchingLabels{"app": l + "-dev-update"},
+		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName},
+	)
+	if len(mPs.Items) == 0 {
+		Z.updState = false
+	} else {
+		Z.updState = true
+		Z.uPod = mPs.Items[0]
+	}
+
+	// Is confPod running?
+	l = mctx.Spec.InlineAcclrs[0].Acclr
+	r.List(ctx, mPs, client.MatchingLabels{"app": l + "-drv-validate"},
+		client.MatchingFields{"spec.nodeName": mctx.Spec.NodeName},
+	)
+	if len(mPs.Items) == 0 {
+		Z.confState = false
+	} else {
+		Z.confState = true
+		Z.cPod = mPs.Items[0]
+	}
+
+	return nil
+}
+
+func (Z *stateControl) init_rest(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) error {
+	fmt.Printf("init_rest\n")
+
+	// Start driver dameonset
+	daemonManifest := "/manifests/drv-daemon/" + mctx.Spec.InlineAcclrs[0].Acclr + "-drv.yaml"
+
+	p := appsv1.DaemonSet{}
+	byf, err := ioutil.ReadFile(daemonManifest)
+	if err != nil {
+		fmt.Printf("Manifests not found: %s\n", err)
+		return err
+	}
+	yamlutil.Unmarshal(byf, &p)
+	err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
+	if err != nil {
+		fmt.Printf("Failed to set controller reference: %s\n", err)
+		return err
+	}
+	err = r.Create(ctx, &p)
+	if err != nil {
+		fmt.Printf("Failed to create pod: %s\n", err)
+		return err
+	}
+
+	// Start Device plugin set
+	daemonManifest = "/manifests/dev-plugin/" + mctx.Spec.InlineAcclrs[0].Acclr + "-sriovdp.yaml"
+
+	p = appsv1.DaemonSet{}
+	byf, err = ioutil.ReadFile(daemonManifest)
+	if err != nil {
+		fmt.Printf("Manifests not found: %s\n", err)
+		return err
+	}
+	yamlutil.Unmarshal(byf, &p)
+	err = ctrl.SetControllerReference(mctx, &p, r.Scheme)
+	if err != nil {
+		fmt.Printf("Failed to set controller reference: %s\n", err)
+		return err
+	}
+	err = r.Create(ctx, &p)
+	if err != nil {
+		fmt.Printf("Failed to create pod: %s\n", err)
+		return err
 	}
 	return nil
 }
@@ -409,64 +501,61 @@ func daemonset_create(mctx *acclrv1beta1.OctNic, ctx context.Context, r *OctNicR
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.13.1/pkg/reconcile
+
 func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
-	fmt.Printf("--> Reconcile reached\n")
+	fmt.Printf("Reconcile reached\n")
 	mctx := &acclrv1beta1.OctNic{}
 	if err := r.Get(ctx, req.NamespacedName, mctx); err != nil {
-		fmt.Printf("unable to fetch UpdateJob: %s\n", err)
+		fmt.Printf("unable to fetch OctNic Policy: %s\n", err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// TODO:
-	// The remote utlitites included in the tools image must
-	// query the device for the sofware versions and reflash
-	// if device's fw version differs from the CRD requested
-	// version. This is currently not supported by the remote
-	// utlitities and, therefore, the update stage will query
-	// the nodes's label.
+	fmt.Printf("vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n")
 
-	err := update_pod_create(mctx, ctx, r)
-	if err != nil {
-		fmt.Printf("Failed to create update PoD: %s\n", err)
-		return ctrl.Result{}, nil
-	}
-	err = update_pod_check(mctx, ctx, r)
-	if err != nil {
-		fmt.Printf("Failed update PoD: %s\n", err)
-		return ctrl.Result{}, nil
-	}
+	Z := stateControl{}
+	Z.ctx = ctx
+	Z.r = r
+	Z.mctx = mctx
 
-	// Start driver daemonSet if not already started
-	err = daemonset_create(mctx, ctx, r, DRIVER_DAEMON)
-	if err != nil {
-		fmt.Printf("Failed to create daemonset: %s\n", err)
-		return ctrl.Result{}, nil
-	}
+	// Read device status from device
+	Z.state_check(ctx, r, mctx)
+	Z.s0_dev_state_check(ctx, r, mctx)
 
-	// Driver Validation and device setup
-	err = setup_validate_pod_create(mctx, ctx, r)
-	if err != nil {
-		fmt.Printf("Failed to create setup_validate: %s\n", err)
-		return ctrl.Result{}, nil
+	var err error
+	if Z.drvState == false || Z.dpState == false {
+		err = Z.init_rest(ctx, r, mctx)
+		return ctrl.Result{}, err
 	}
-
-	// Check Driver Validation Pods
-	err = setup_validate_pod_check(mctx, ctx, r)
-	if err != nil {
-		fmt.Printf("Failed setup_validate PoD: %s\n", err)
-		return ctrl.Result{}, nil
+	a := mctx.Spec.InlineAcclrs[0]
+	if Z.currentDevState.PciAddr == a.PciAddr {
+		if Z.currentDevState.FwImage != a.FwImage {
+			if Z.currentDevState.FwTag != a.FwTag {
+				if Z.currentDevState.PFdriver != "" {
+					Z.s1_device_remove(ctx, r, mctx)
+					return ctrl.Result{}, err
+				} else {
+					Z.s1_device_reflash(ctx, r, mctx)
+					return ctrl.Result{}, err
+				}
+			}
+		}
 	}
-
-	// Device plugin
-	err = daemonset_create(mctx, ctx, r, PLUGIN_DAEMON)
-	if err != nil {
-		fmt.Printf("Failed to create daemonset: %s\n", err)
-		return ctrl.Result{}, nil
+	if Z.confState == false {
+		if Z.drvState == true && Z.dpState == true {
+			err := Z.s3_device_add(ctx, r, mctx)
+			return ctrl.Result{}, err
+		}
 	}
+		
+	fmt.Printf("vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n")
+	fmt.Printf("node: %s\n", mctx.Spec.NodeName)
+	fmt.Printf("NumAcclr: %d\n", len(mctx.Spec.InlineAcclrs))
+	fmt.Printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n")
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, err
+
 }
 
 // SetupWithManager sets up the controller with the Manager.
