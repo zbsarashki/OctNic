@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: f105o-dev-monitor-NAME_FILLED_BY_OPERATOR
+  namespace: default
+  labels:
+    app: "f105o-dev-monitor"
+spec:
+  nodeName: FILLED_BY_OPERATOR
+  restartPolicy: Never
+  imagePullSecrets:
+  - name: local-registry
+  containers:
+  - name: f105o-dev-monitor-ctr
+    image: debian:bullseye
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      privileged: true # For remote utils
+    #command: [ "/config_crd_to_json_v1.sh" ]
+    #args:
+    #- $device_pciAddr
+    #- $dp_resourceName
+    command: [ "/bin/bash" ]
+    args:
+    - "-c"
+    - "--"
+    - >
+       sleep 30;
+       exit 0;
+    env:
+    - name: device_pciAddr
+      value: PCIADDR_FILLED_BY_OPERATOR
+    volumeMounts:
+    - name: class-dev
+      mountPath: /sys/dev
+      readOnly: false
+    - name: class-devices
+      mountPath: /sys/devices
+      readOnly: false
+    - name: class-bus
+      mountPath: /sys/bus
+      readOnly: false
+  volumes:
+  - name: class-dev
+    hostPath:
+      path: /sys/dev
+  - name: class-devices
+    hostPath:
+      path: /sys/devices
+  - name: class-bus
+    hostPath:
+      path: /sys/bus

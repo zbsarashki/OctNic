@@ -87,7 +87,7 @@ type DevState struct {
 	FwImage  string
 	FwTag    string
 	Status   string
-	PFdriver string
+	PfDriver string
 }
 
 // The remote utlitites included in the tools image must
@@ -95,7 +95,7 @@ type DevState struct {
 // if device's fw version differs from the CRD requested
 // version. This is currently not supported by the remote
 // utlitities.
-func (Z stateControl) s0_dev_state_check(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) error {
+func (Z *stateControl) s0_dev_state_check(ctx context.Context, r *OctNicReconciler, mctx *acclrv1beta1.OctNic) error {
 
 	fmt.Printf("-----> s0_dev_state_check\n")
 	rvl := DevState{}
@@ -170,7 +170,14 @@ func (Z stateControl) s0_dev_state_check(ctx context.Context, r *OctNicReconcile
 	fmt.Printf("-----> %d, %+v\n", len(data), rvl)
 	//}
 
-	Z.currentDevState = rvl
+	Z.currentDevState.PciAddr = rvl.PciAddr
+	Z.currentDevState.Numvfs= rvl.Numvfs
+	Z.currentDevState.FwImage = rvl.FwImage
+	Z.currentDevState.FwTag = rvl.FwTag
+	Z.currentDevState.Status = rvl.Status
+	Z.currentDevState.PfDriver = rvl.PfDriver
+	fmt.Printf("-----> %d, %+v\n", len(data), rvl)
+	fmt.Printf("Z----> %d, %+v\n", len(data), Z.currentDevState)
 	return nil
 }
 
@@ -321,8 +328,7 @@ func (Z *stateControl) s1_device_reflash(ctx context.Context, r *OctNicReconcile
 
 	if Z.updState == true {
 		if Z.uPod.Status.Phase == "Succeeded" {
-			err := r.Delete(ctx, &Z.cPod)
-			return err
+			r.Delete(ctx, &Z.cPod)
 		}
 		return nil
 	}
@@ -521,7 +527,9 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Read device status from device
 	Z.state_check(ctx, r, mctx)
+	fmt.Printf("-----> %+v\n", Z.currentDevState)
 	Z.s0_dev_state_check(ctx, r, mctx)
+	fmt.Printf("-----> %+v\n", Z.currentDevState)
 
 	var err error
 	if Z.drvState == false || Z.dpState == false {
@@ -529,18 +537,18 @@ func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 	a := mctx.Spec.InlineAcclrs[0]
+	fmt.Printf("pci %s == ? %s\n", Z.currentDevState.PciAddr, a.PciAddr)
 	if Z.currentDevState.PciAddr == a.PciAddr {
-		if Z.currentDevState.FwImage != a.FwImage {
-			if Z.currentDevState.FwTag != a.FwTag {
-				if Z.currentDevState.PFdriver != "" {
-					Z.s1_device_remove(ctx, r, mctx)
+		if (Z.currentDevState.FwImage != a.FwImage) || 
+			  (Z.currentDevState.FwTag != a.FwTag) {
+				if Z.currentDevState.PfDriver != "" {
+					err := Z.s1_device_remove(ctx, r, mctx)
 					return ctrl.Result{}, err
 				} else {
-					Z.s1_device_reflash(ctx, r, mctx)
+					err := Z.s1_device_reflash(ctx, r, mctx)
 					return ctrl.Result{}, err
 				}
 			}
-		}
 	}
 	if Z.confState == false {
 		if Z.drvState == true && Z.dpState == true {

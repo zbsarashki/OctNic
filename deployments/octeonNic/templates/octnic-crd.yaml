@@ -1,0 +1,54 @@
+apiVersion: acclr.github.com/v1beta1
+kind: OctNic
+metadata:
+  name: inline-acclr-node-0
+  namespace: default
+spec:
+  nodename: controller-0
+  inlineAcclrs: 
+  - acclr: "f105o"
+    pciAddr: "0000:af:00.0"
+    numvfs: "7"
+    fwimage: "marvellocteon/docker_rootfs_update"
+    fwtag: "SDK11.23.04"
+    resourcePrefix: "marvell.com"
+    resourceName:
+      - "marvell_sriov_net_vamp_af#0-3,octeon_ep_vf"
+      - "marvell_sriov_net_rmp_af#4,5-6,Octeon_ep_vf"
+# Multiple cards and hosts are not supported in this PoC
+#  - acclr: "f105o"
+#    pciAddr: "0000:51:00.0"
+#    numvfs: "7"
+#    fwimage: "marvellocteon/docker_rootfs_update"
+#    fwtag: "SDK11.23.04"
+#    resourcePrefix: "marvell.com"
+#    resourceName:
+#      - "marvell_sriov_net_vamp_af#0-3,octeon_ep_vf"
+#      - "marvell_sriov_net_rmp_af#4,5-6,Octeon_ep_vf"
+#---
+#apiVersion: acclr.github.com/v1beta1
+#kind: OctNic
+#metadata:
+#  name: inline-acclr-node-1
+#spec:
+#  nodename: controller-1
+#  inlineAcclrs:
+#  - acclr: "f105o"
+#    pciAddr: "0000:af:00.0"
+#    numvfs: "7"
+#    fwimage: "marvellocteon/docker_rootfs_update"
+#    fwtag: "SDK11.23.04"
+#    resourcePrefix: "marvell.com"
+#    resourceName:
+#      - "marvell_sriov_net_vamp_af#0-3,octeon_ep_vf"
+#      - "marvell_sriov_net_rmp_af#4,5-6,Octeon_ep_vf"
+#  - acclr: "f105o"
+#    pciAddr: "0000:51:00.0"
+#    numvfs: "7"
+#    fwimage: "marvellocteon/docker_rootfs_update"
+#    fwtag: "SDK11.23.04"
+#    resourcePrefix: "marvell.com"
+#    resourceName:
+#      - "marvell_sriov_net_vamp_af#0-3,octeon_ep_vf"
+#      - "marvell_sriov_net_rmp_af#4,5-6,Octeon_ep_vf"
+#
