@@ -50,8 +50,10 @@ spec:
         #- "--"
         #- >
         #  sleep infinity;
-
         volumeMounts:
+        - name: varunfs
+          mountPath: /var/run/octnic/
+          readOnly: false
         - name: class-dev
           mountPath: /sys/dev
           readOnly: false
@@ -62,6 +64,9 @@ spec:
           mountPath: /sys/bus
           readOnly: false
       volumes:
+      - name: varunfs
+        hostPath:
+          path: /var/run/octnic
       - name: class-dev
         hostPath:
           path: /sys/dev
