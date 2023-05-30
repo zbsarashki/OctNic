@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: f105o-dev-control
+  #namespace: kube-system
+  #namespace: tbcntrl-system
+  namespace: default
+  labels:
+    tier: node
+    app: "f105o-dev-control"
+spec:
+  selector:
+    matchLabels:
+      tier: node
+      app: "f105o-dev-control"
+  template:
+    metadata:
+      labels:
+        name: "f105o-dev-control"
+        tier: node
+        app: "f105o-dev-control"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: marvell.com/inline_acclr_present
+                operator: In
+                values:
+                - "true"
+      nodeSelector:
+        beta.kubernetes.io/arch: amd64
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      imagePullSecrets:
+        - name: local-registry
+      priorityClassName: system-node-critical
+      containers:
+      - name: f105o-dev-control-ctr
+        image: registry.local:9001/staging/f105o-dev-control:0.0.1
+        securityContext:
+          privileged: true
+        command: ["/octControl"]
+        #command: ["/bin/sh"]
+        #args:
+        #- "-c"
+        #- "--"
+        #- >
+        #  sleep infinity;
+
+        volumeMounts:
+        - name: class-dev
+          mountPath: /sys/dev
+          readOnly: false
+        - name: class-devices
+          mountPath: /sys/devices
+          readOnly: false
+        - name: class-bus
+          mountPath: /sys/bus
+          readOnly: false
+      volumes:
+      - name: class-dev
+        hostPath:
+          path: /sys/dev
+      - name: class-devices
+        hostPath:
+          path: /sys/devices
+      - name: class-bus
+        hostPath:
+          path: /sys/bus

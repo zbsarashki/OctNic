@@ -20,7 +20,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
+	//yamlutil "k8s.io/apimachinery/pkg/util/yaml"
+	yaml "gopkg.in/yaml.v3"
 	"net/http"
 )
 
@@ -33,8 +34,8 @@ type DevState struct {
 	ResourcePrefix string   `json:"resourcePrefix,omitempty"`
 	ResourceName   []string `json:"resourceName,omitempty"`
 
-	Status     string `json:"status,omitempty"`
-	PfDriver   string `json:"pfdriver,omitempty"`
+	Status   string `json:"status,omitempty"`
+	PfDriver string `json:"pfdriver,omitempty"`
 }
 
 func getAcclrState(PodIP, PciAddr string) (DevState, error) {
@@ -49,7 +50,7 @@ func getAcclrState(PodIP, PciAddr string) (DevState, error) {
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
-	err = yamlutil.Unmarshal(data, &devstate)
+	err = yaml.Unmarshal(data, &devstate)
 	if err != nil {
 		return devstate, err
 	}
@@ -60,24 +61,36 @@ func getAcclrState(PodIP, PciAddr string) (DevState, error) {
 
 var CONTENTTYPE string = "application/json; charset=utf-8"
 
-func postAcclrUnbind(PodIP, PciAddr string) (DevState, error) {
+func postAcclrUnbind(PodIP string, d DevState) (DevState, error) {
 
-	devstate := DevState{}
+	postUrl := "http://" + PodIP + ":4004/UnbindDevice"
 
-	Req := []byte{}
-	postUrl := "http://" + PodIP + ":4004/" + PciAddr
-	resp, err := http.Post(postUrl, CONTENTTYPE, bytes.NewBuffer(Req))
+	Req, err := yaml.Marshal(d)
+	if err != nil {
+		fmt.Printf("Failed to Marshal: %s\n", err)
+		return DevState{}, err
+	}
+	resp, err := http.NewRequest("POST", postUrl, bytes.NewBuffer(Req))
 	if err != nil {
 		fmt.Printf("http.Get Failed: %s\n", err)
-		return devstate, err
+		return DevState{}, err
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	err = yamlutil.Unmarshal(data, &devstate)
+	resp.Header.Add("Content-Type", CONTENTTYPE)
+	client := &http.Client{}
+	r, err := client.Do(resp)
 	if err != nil {
-		return devstate, err
+		fmt.Printf("http.NewRequestFailed: %s\n", err)
+		return DevState{}, err
 	}
-	fmt.Printf("-----> %d, %+v\n", len(data), devstate)
 
-	return devstate, err
+	ds := DevState{}
+	defer r.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	err = yaml.Unmarshal(data, &ds)
+	if err != nil {
+		return DevState{}, err
+	}
+	fmt.Printf("-----> %d, %+v\n", len(data), ds)
+
+	return ds, err
 }

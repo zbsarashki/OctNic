@@ -30,26 +30,31 @@ spec:
           spec:
             description: OctNicSpec defines the desired state of OctNic
             properties:
-              acclr:
-                type: string
-              fwimage:
-                description: FwImage refers to the runtime FW and Rootfs, FwTag refers to the SDK version of the above.
-                type: string
-              fwtag:
-                type: string
-              nodename:
-                type: string
-              numvfs:
-                type: string
-              pciAddr:
-                description: 'Device configuration TODO: Change PciAddr to string array to hold PCI devices on a given node.'
-                type: string
-              resourceName:
-                description: 'Pass resource names and their mappings through CRD Syntax: resourcename: - "marvell_sriov_net_vamp#0" - "marvell_sriov_net_rmp#8-15" - "marvell_sriov_net_dip#20-21" - "marvell_sriov_net_dpp#32,36-37,40-47"'
+              inlineAcclrs:
                 items:
-                  type: string
+                  properties:
+                    acclr:
+                      type: string
+                    fwimage:
+                      description: FwImage refers to the runtime FW and Rootfs, FwTag refers to the SDK version of the above. These are used by the UpdatePod/ToolsImage to Flash the MMC. Ideally the ToolsImage should query the device for the runtime versions (and configuration) first, and update the device if there is a mismatch between the requested versions (FwImage:FwTag) and what is running on the card.
+                      type: string
+                    fwtag:
+                      type: string
+                    numvfs:
+                      type: string
+                    pciAddr:
+                      description: Device configuration
+                      type: string
+                    resourceName:
+                      description: 'Pass resource names and their mappings through CRD Syntax: resourcename: - "marvell_sriov_net_vamp#0" - "marvell_sriov_net_rmp#8-15" - "marvell_sriov_net_dip#20-21" - "marvell_sriov_net_dpp#32,36-37,40-47" Resultant resource names will be appended to by their root''s pci address, i.e.: - "marvell_sriov_net_vamp_af_00_0"'
+                      items:
+                        type: string
+                      type: array
+                    resourcePrefix:
+                      type: string
+                  type: object
                 type: array
-              resourcePrefix:
+              nodename:
                 type: string
             type: object
           status:
