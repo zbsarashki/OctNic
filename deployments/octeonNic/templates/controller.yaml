@@ -115,9 +115,9 @@ spec:
           readOnly: true
         {{- end }}
 
-        {{- range $path, $_ := .Files.Glob "manifests/drv-daemon-validate/*" }}
+        {{- range $path, $_ := .Files.Glob "manifests/drv-control/*" }}
         - name: assets
-          mountPath: {{ printf "/manifests/drv-daemon-validate/%s" (base $path) }}
+          mountPath: {{ printf "/manifests/drv-control/%s" (base $path) }}
           subPath: {{ printf "%s" (base $path) }}
           readOnly: true
         {{- end }}

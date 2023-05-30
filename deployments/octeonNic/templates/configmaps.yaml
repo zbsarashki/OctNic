@@ -14,7 +14,7 @@ data:
 {{ $.Files.Get $path | indent 4 }}
 {{- end }}
 
-{{- range $path, $_ := .Files.Glob "manifests/drv-daemon-validate/*" }}
+{{- range $path, $_ := .Files.Glob "manifests/dev-control/*" }}
 {{ printf "%s" (base $path) | indent 2 }}: |-
 {{ $.Files.Get $path | indent 4 }}
 {{- end }}
