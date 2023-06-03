@@ -18,25 +18,13 @@ package controllers
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	//yamlutil "k8s.io/apimachinery/pkg/util/yaml"
-	yaml "gopkg.in/yaml.v3"
 	"net/http"
+	//yaml "gopkg.in/yaml.v3"
 )
-
-type DevState struct {
-	//inlineAcclrs	acclrv1bet1.InlineAcclr
-	PciAddr        string   `json:"pciAddr,omitempty"`
-	NumVfs         string   `json:"numvfs,omitempty"`
-	FwImage        string   `json:"fwImage,omitempty"`
-	FwTag          string   `json:"fwTag,omitempty"`
-	ResourcePrefix string   `json:"resourcePrefix,omitempty"`
-	ResourceName   []string `json:"resourceName,omitempty"`
-
-	Status   string `json:"status,omitempty"`
-	PfDriver string `json:"pfdriver,omitempty"`
-}
 
 func getAcclrState(PodIP, PciAddr string) (DevState, error) {
 
@@ -50,22 +38,22 @@ func getAcclrState(PodIP, PciAddr string) (DevState, error) {
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
-	err = yaml.Unmarshal(data, &devstate)
+	err = json.Unmarshal(data, &devstate)
 	if err != nil {
 		return devstate, err
 	}
-	fmt.Printf("-----> %d, %+v\n", len(data), devstate)
+	//fmt.Printf("-----> %d, %+v\n", len(data), devstate)
 
 	return devstate, err
 }
 
-var CONTENTTYPE string = "application/json; charset=utf-8"
+var CONTENTTYPE string = "application/json;charset=utf-8"
 
-func postAcclrUnbind(PodIP string, d DevState) (DevState, error) {
+func postAcclr(PodIP string, d DevState) (DevState, error) {
 
-	postUrl := "http://" + PodIP + ":4004/UnbindDevice"
+	postUrl := "http://" + PodIP + ":4004/"
 
-	Req, err := yaml.Marshal(d)
+	Req, err := json.Marshal(d)
 	if err != nil {
 		fmt.Printf("Failed to Marshal: %s\n", err)
 		return DevState{}, err
@@ -85,12 +73,12 @@ func postAcclrUnbind(PodIP string, d DevState) (DevState, error) {
 
 	ds := DevState{}
 	defer r.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	err = yaml.Unmarshal(data, &ds)
+	data, err := io.ReadAll(r.Body)
+	err = json.Unmarshal(data, &ds)
 	if err != nil {
 		return DevState{}, err
 	}
-	fmt.Printf("-----> %d, %+v\n", len(data), ds)
+	//fmt.Printf("-----> %d, %+v\n", len(data), ds)
 
 	return ds, err
 }
