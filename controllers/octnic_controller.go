@@ -18,7 +18,7 @@ package controllers
 
 import (
 	"context"
-	"fmt"
+	xlog "log"
 	//	"io"
 	"io/ioutil"
 	"regexp"
@@ -38,6 +38,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	"time"
 
 	acclrv1beta1 "github.com/zbsarashki/OctNic/api/v1beta1"
 )
@@ -62,6 +64,7 @@ type OctNicReconciler struct {
 var DRIVER_DAEMON = "DRIVER_DAEMON"
 var CONTRL_DAEMON = "CONTRL_DAEMON"
 var PLUGIN_DAEMON = "PLUGIN_DAEMON"
+var SRIOVDP_POD_LABEL = "-sriovdp"
 
 var MRVL_LABEL_KEY = "marvell.com/inline_acclr_present"
 var NODE_LABEL_NAME = "kubernetes.io/hostname"
@@ -116,25 +119,24 @@ type DevState struct {
 	Command  string `json:"command,omitempty"`
 }
 
+func (Z *StateControl) podStateRestart(app string) bool {
 
-func (Z *StateControl) podStateRestart(app string) (bool){
-
-	sPs := corev1.PodList{}
+	sPs := &corev1.PodList{}
 	l := Z.dctx.Spec.InlineAcclrs[0].Acclr
-	err := Z.rec.List(Z.ctx, &sPs, client.MatchingLabels{"app": l + app},
-		client.MatchingFields{"spec.nodeName": Z.dctx.Spec.NodeName},)
-	if err !=nil {
-		fmt.Printf("Failed to get Pod\n")
+	err := Z.rec.List(Z.ctx, sPs, client.MatchingLabels{"app": l + app},
+		client.MatchingFields{"spec.nodeName": Z.dctx.Spec.NodeName})
+	if err != nil {
+		xlog.Printf("Failed to get Pod\n")
 		return false
 	}
 	if len(sPs.Items) == 0 {
-		fmt.Printf("Plugin Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
+		xlog.Printf("Plugin Pod Not found on: %s len(sPs.Items) == %d cond: %s\n", Z.dctx.Spec.NodeName, len(sPs.Items), l + app)
 		return false
 	}
 
 	err = Z.rec.Delete(Z.ctx, &sPs.Items[0])
-	if err !=nil {
-		fmt.Printf("Failed to delete Pod\n")
+	if err != nil {
+		xlog.Printf("Failed to delete Pod\n")
 		return false
 	}
 
@@ -142,7 +144,7 @@ func (Z *StateControl) podStateRestart(app string) (bool){
 }
 
 func (Z *StateControl) init() {
-	//fmt.Printf("-->     init()\n")
+	//xlog.Printf("-->     init()\n")
 
 	if Z.controller != nil {
 		return
@@ -165,13 +167,13 @@ func (Z *StateControl) InitAndExecute(
 	r *OctNicReconciler,
 	dctx *acclrv1beta1.OctNic) (ctrl.Result, error) {
 
-	fmt.Printf("-->     InitAndExecute()\n")
+	xlog.Printf("-->     InitAndExecute()\n")
 	rvl := 1 //  S0CurNodeState
 	Z.ctx = ctx
 	Z.dctx = dctx
 	Z.rec = r
 	Z.init()
-	//fmt.Printf("%d\n", len(Z.controller))
+	//xlog.Printf("%d\n", len(Z.controller))
 
 	daemSet := appsv1.DaemonSet{}
 
@@ -213,28 +215,27 @@ func (Z *StateControl) InitAndExecute(
 
 	Z.idx = rvl // S0DaemsStart OR S0CurNodeState
 
-	//fmt.Printf("-->     InitAndExecute() %d\n", Z.idx)
 	// Loop
 	var m ctrl.Result
 	for fp := Z.controller[Z.idx]; fp != nil && Z.idx < SnFinal; fp = Z.controller[Z.idx] {
 
-		fmt.Printf("-->     InitAndExecute() %d\n", Z.idx)
+		xlog.Printf("-->     InitAndExecute() %d\n", Z.idx)
 		m, err = fp()
 		if err != nil {
-			fmt.Printf("loop: %s\n", err)
+			xlog.Printf("loop: %s\n", err)
 			Z.controller[SnFinal]()
 			return m, err
 		}
 	}
-	fmt.Printf("-->     InitAndExecute() Exit\n")
-	return ctrl.Result{}, nil
+	xlog.Printf("-->     InitAndExecute() Exit\n")
+	return m, nil
 }
 
 func (Z *StateControl) s0StartOneDaem(daemonManifest string) (ctrl.Result, error) {
 	p := appsv1.DaemonSet{}
 	byf, err := ioutil.ReadFile(daemonManifest)
 	if err != nil {
-		fmt.Printf("Manifests not found: %s\n", err)
+		xlog.Printf("Manifests not found: %s\n", err)
 		Z.idx = SnFinal
 		return ctrl.Result{}, err
 	}
@@ -245,16 +246,16 @@ func (Z *StateControl) s0StartOneDaem(daemonManifest string) (ctrl.Result, error
 	}
 	err = Z.rec.Create(Z.ctx, &p)
 	if err != nil {
-		fmt.Printf("Failed to create pod: %s\n", err)
+		xlog.Printf("Failed to create pod: %s\n", err)
 		Z.idx = SnFinal
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 10000 * time.Millisecond}, nil
 }
 
 func (Z *StateControl) s0DaemsStart() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s0DaemsStart()\n")
+	xlog.Printf("-->     s0DaemsStart()\n")
 
 	// TODO:
 	// Start driver dameonset
@@ -262,7 +263,7 @@ func (Z *StateControl) s0DaemsStart() (ctrl.Result, error) {
 		daemonManifest := "/manifests/drv-daemon/" + Z.dctx.Spec.InlineAcclrs[0].Acclr + "-drv.yaml"
 		m, err := Z.s0StartOneDaem(daemonManifest)
 		if err != nil {
-			fmt.Printf("Failed to set controller reference: %s\n", err)
+			xlog.Printf("Failed to set controller reference: %s\n", err)
 			Z.idx = SnFinal
 			return m, err
 		}
@@ -273,7 +274,7 @@ func (Z *StateControl) s0DaemsStart() (ctrl.Result, error) {
 		daemonManifest := "/manifests/dev-plugin/" + Z.dctx.Spec.InlineAcclrs[0].Acclr + "-sriovdp.yaml"
 		m, err := Z.s0StartOneDaem(daemonManifest)
 		if err != nil {
-			fmt.Printf("Failed to set controller reference: %s\n", err)
+			xlog.Printf("Failed to set controller reference: %s\n", err)
 			Z.idx = SnFinal
 			return m, err
 		}
@@ -284,7 +285,7 @@ func (Z *StateControl) s0DaemsStart() (ctrl.Result, error) {
 		daemonManifest := "/manifests/dev-control/" + Z.dctx.Spec.InlineAcclrs[0].Acclr + "-dev-control.yaml"
 		m, err := Z.s0StartOneDaem(daemonManifest)
 		if err != nil {
-			fmt.Printf("Failed to set controller reference: %s\n", err)
+			xlog.Printf("Failed to set controller reference: %s\n", err)
 			Z.idx = SnFinal
 			return m, err
 		}
@@ -296,7 +297,7 @@ func (Z *StateControl) s0DaemsStart() (ctrl.Result, error) {
 
 func (Z *StateControl) s0CurNodeState() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s0CurNodeState()\n")
+	xlog.Printf("-->     s0CurNodeState()\n")
 
 	mPs := &corev1.PodList{}
 	l := Z.dctx.Spec.InlineAcclrs[0].Acclr
@@ -304,22 +305,19 @@ func (Z *StateControl) s0CurNodeState() (ctrl.Result, error) {
 		client.MatchingFields{"spec.nodeName": Z.dctx.Spec.NodeName},
 	)
 	if len(mPs.Items) == 0 {
-		fmt.Printf("Control Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
+		xlog.Printf("Control Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
 		Z.idx = SnFinal
 		//return ctrl.Result{}, nil
-		return ctrl.Result{RequeueAfter: 60}, nil
+		return ctrl.Result{RequeueAfter: 10000 * time.Millisecond}, nil
 	}
 
 	// TODO: This part needs to change
-	//e := Z.dctx.Spec.InlineAcclrs[0]
-	//devstate, err := getAcclrState(mPs.Items[0].Status.PodIP, e.PciAddr)
 	devState := Z.mkDevState("/StatusDevice")
 	devState, err := postAcclr(mPs.Items[0].Status.PodIP, devState)
 	if err != nil {
-		fmt.Printf("Failed getAcclrState : %s\n", err)
+		xlog.Printf("Failed getAcclrState : %s\n", err)
 		Z.idx = SnFinal
-		//return ctrl.Result{}, nil
-		return ctrl.Result{RequeueAfter: 60}, nil
+		return ctrl.Result{RequeueAfter: 10000 * time.Millisecond}, nil
 	}
 
 	rvl := acclrv1beta1.InlineAcclr{}
@@ -339,7 +337,7 @@ func (Z *StateControl) s0CurNodeState() (ctrl.Result, error) {
 
 func (Z *StateControl) s1SetNextState() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s1SetNextState()\n")
+	xlog.Printf("-->     s1SetNextState()\n")
 
 	c := Z.c.axSet[0]
 	d := Z.dctx.Spec.InlineAcclrs[0]
@@ -354,7 +352,7 @@ func (Z *StateControl) s1SetNextState() (ctrl.Result, error) {
 		if mPs.Items[0].Status.Phase == "Succeeded" {
 			err := Z.rec.Delete(Z.ctx, &mPs.Items[0])
 			if err != nil {
-				fmt.Printf("Failed to delete Pod: %s\n", err)
+				xlog.Printf("Failed to delete Pod: %s\n", err)
 				Z.idx = SnFinal
 				return ctrl.Result{}, nil
 			}
@@ -364,11 +362,12 @@ func (Z *StateControl) s1SetNextState() (ctrl.Result, error) {
 		// TODO: Handle fail cases
 		Z.idx = SnFinal
 		return ctrl.Result{}, nil
-		//return ctrl.Result{RequeueAfter: 60}, nil
+		//return ctrl.Result{RequeueAfter: 10000 * time.Millisecond}, nil
 	}
 
 	if d.PciAddr == c.ax.PciAddr {
 		if (d.FwImage != c.ax.FwImage) || (d.FwTag != c.ax.FwTag) {
+				xlog.Printf("c.Status: %s c.PfDriver: %s\n", c.Status, c.PfDriver)
 			if (c.Status == "Linux") || (c.PfDriver != "") {
 				Z.idx = S2RemoveDevice
 				return ctrl.Result{}, nil
@@ -391,23 +390,12 @@ func (Z *StateControl) s1SetNextState() (ctrl.Result, error) {
 			return ctrl.Result{}, nil
 		}
 
-		fmt.Printf("TODO: REstart DevPlugin Pod on the node\n");
-		return ctrl.Result{RequeueAfter: 60}, nil
-		// wished we had a since!
-		//if c.ax.NumVfs == d.NumVfs && // Therfore
-		//	c.Status == "Linux" { // And if sriov-dplugin restarted
-		//		if Z.demState("PLUGIN", d.NodeName) == true {
-					// Make sure device plugin added resouce
-		//			fmt.Printf("TODO: REstart DevPlugin Pod on the controller\n");
-		//			return ctrl.Result{}, nil
-		//		} // otherwise restart plugin
-		//}
-		//return ctrl.Result{}, nil
+		//TODO: Check and REstart DevPlugin Pod on the node
+		Z.idx = SnFinal
 	}
 
 	Z.idx = SnFinal
 	return ctrl.Result{}, nil
-	//return ctrl.Result{RequeueAfter: 60 /*nextRun.Sub(r.Now())*/}, nil
 }
 
 func (Z *StateControl) mkDevState(Command string) DevState {
@@ -426,10 +414,10 @@ func (Z *StateControl) mkDevState(Command string) DevState {
 
 func (Z *StateControl) s2AddDevice() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s2AddDevice()\n")
+	xlog.Printf("-->     s2AddDevice()\n")
 
 	// TODO: Use service
-
+	// TODO: Commands should use ssh + ansible (preferred) or grpc.
 	d := Z.dctx.Spec.InlineAcclrs[0] // Desired state from CRD
 	cPs := &corev1.PodList{}
 	l := d.Acclr
@@ -437,7 +425,7 @@ func (Z *StateControl) s2AddDevice() (ctrl.Result, error) {
 		client.MatchingFields{"spec.nodeName": Z.dctx.Spec.NodeName},
 	)
 	if len(cPs.Items) == 0 {
-		fmt.Printf("Config Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
+		xlog.Printf("Config Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
 		Z.idx = SnFinal
 		return ctrl.Result{}, nil
 	}
@@ -445,9 +433,9 @@ func (Z *StateControl) s2AddDevice() (ctrl.Result, error) {
 	devState := Z.mkDevState("/BindDevice")
 	devState, err := postAcclr(cPs.Items[0].Status.PodIP, devState)
 	if err != nil {
-		fmt.Printf(" Got: %+v\n\n and err of: %s", devState, err)
+		xlog.Printf(" Got: %+v\n\n and err of: %s", devState, err)
 		Z.idx = SnFinal
-		return ctrl.Result{RequeueAfter: 60}, nil
+		return ctrl.Result{RequeueAfter: 10000 * time.Millisecond}, nil
 	}
 	Z.idx = S3RestartDP
 	return ctrl.Result{}, nil
@@ -455,7 +443,7 @@ func (Z *StateControl) s2AddDevice() (ctrl.Result, error) {
 
 func (Z *StateControl) s2RemoveDevice() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s2RemoveDevice()\n")
+	xlog.Printf("-->     s2RemoveDevice()\n")
 
 	d := Z.dctx.Spec.InlineAcclrs[0] // Desired state from CRD
 	cPs := &corev1.PodList{}
@@ -464,33 +452,39 @@ func (Z *StateControl) s2RemoveDevice() (ctrl.Result, error) {
 		client.MatchingFields{"spec.nodeName": Z.dctx.Spec.NodeName},
 	)
 	if len(cPs.Items) == 0 {
-		fmt.Printf("Config Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
+		xlog.Printf("Config Pod Not found on: %s\n", Z.dctx.Spec.NodeName)
 		Z.idx = SnFinal
 		return ctrl.Result{}, nil
 	}
 
 	devState := Z.mkDevState("/UnbindDevice")
-	devState, err := postAcclr(cPs.Items[0].Status.PodIP, devState)
-	fmt.Printf(" Got: %+v\n\n and err of: %s", devState, err)
+	devState,err := postAcclr(cPs.Items[0].Status.PodIP, devState)
+	if err != nil {
+		xlog.Printf(" Got: %+v\n\n and err of: %s", devState, err)
+	}
 	// TODO:
 	// Check for errors
 	Z.idx = S3RestartDP
+	// Wait for device plugin to restart. The next state is reflash.
 	return ctrl.Result{}, nil
 }
 
 func (Z *StateControl) s3RestartDP() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s3RestartDP()\n")
+	xlog.Printf("-->     s3RestartDP()\n")
 
-	Z.podStateRestart("sriovdp")
+	if Z.podStateRestart(SRIOVDP_POD_LABEL) == false {
+		Z.idx = S3RestartDP
+		return ctrl.Result{}, nil
+	}
 
 	Z.idx = SnFinal
-	return ctrl.Result{}, nil
+	return ctrl.Result{Requeue: true, RequeueAfter: 60000 * time.Millisecond}, nil
 }
 
 func (Z *StateControl) s2ReFlashDevice() (ctrl.Result, error) {
 
-	fmt.Printf("-->     s2ReFlashDevice()\n")
+	xlog.Printf("-->     s2ReFlashDevice()\n")
 	Z.idx = SnFinal
 
 	p := corev1.Pod{}
@@ -498,7 +492,7 @@ func (Z *StateControl) s2ReFlashDevice() (ctrl.Result, error) {
 	byf, err := ioutil.ReadFile("/manifests/dev-update/" + l + "-update.yaml")
 
 	if err != nil {
-		fmt.Printf("Manifests not found: %s\n", err)
+		xlog.Printf("Manifests not found: %s\n", err)
 		return ctrl.Result{}, nil
 	}
 
@@ -513,18 +507,18 @@ func (Z *StateControl) s2ReFlashDevice() (ctrl.Result, error) {
 
 	err = yamlutil.Unmarshal(byf, &p)
 	if err != nil {
-		fmt.Printf("%s\n", err)
+		xlog.Printf("%s\n", err)
 		return ctrl.Result{}, nil
 	}
 	err = ctrl.SetControllerReference(Z.dctx, &p, Z.rec.Scheme)
 	if err != nil {
-		fmt.Printf("Failed to set controller reference: %s\n", err)
+		xlog.Printf("Failed to set controller reference: %s\n", err)
 		return ctrl.Result{}, err
 	}
 
 	err = Z.rec.Create(Z.ctx, &p)
 	if err != nil {
-		fmt.Printf("Failed to create pod: %s\n", err)
+		xlog.Printf("Failed to create pod: %s\n", err)
 		return ctrl.Result{}, nil
 	}
 
@@ -534,7 +528,7 @@ func (Z *StateControl) s2ReFlashDevice() (ctrl.Result, error) {
 }
 
 func (Z *StateControl) snFinal() (ctrl.Result, error) {
-	fmt.Printf("-->     snFinal()\n")
+	xlog.Printf("-->     snFinal()\n")
 	Z.idx = SnFinal + 1 // we should never be here
 	return ctrl.Result{}, nil
 }
@@ -561,22 +555,23 @@ func (Z *StateControl) snFinal() (ctrl.Result, error) {
 func (r *OctNicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
-	fmt.Printf("Reconcile reached\n")
+	xlog.Printf("Reconcile reached\n")
 	dctx := &acclrv1beta1.OctNic{}
 	if err := r.Get(ctx, req.NamespacedName, dctx); err != nil {
-		fmt.Printf("unable to fetch OctNic Policy: %s\n", err)
+		xlog.Printf("unable to fetch OctNic Policy: %s\n", err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	fmt.Printf("vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n")
+	xlog.Printf("vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n")
 
 	var Zi StateIf = &StateControl{}
-
 	m, err := Zi.InitAndExecute(ctx, r, dctx)
-	fmt.Printf("node: %s\n", dctx.Spec.NodeName)
-	fmt.Printf("NumAcclr: %d err if any: %s\n", len(dctx.Spec.InlineAcclrs), err)
-	fmt.Printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n")
 
+	xlog.Printf("node: %s\n", dctx.Spec.NodeName)
+	xlog.Printf("NumAcclr: %d err if any: %s\n", len(dctx.Spec.InlineAcclrs), err)
+	xlog.Printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n")
+
+	//return ctrl.Result{Requeue: true, RequeueAfter: 60000 * time.Millisecond}, nil
 	return m, err
 }
 
@@ -594,21 +589,22 @@ func (r *OctNicReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	c, err := controller.New("OctNic-controller", mgr,
 		controller.Options{Reconciler: r, MaxConcurrentReconciles: 1})
 	if err != nil {
-		fmt.Printf("Failed to create new controller: %s\n", err)
+		xlog.Printf("Failed to create new controller: %s\n", err)
 		return err
 	}
 	err = c.Watch(&source.Kind{Type: &acclrv1beta1.OctNic{}}, &handler.EnqueueRequestForObject{})
 	if err != nil {
-		fmt.Printf("Failed to add watch controller: %s\n", err)
+		xlog.Printf("Failed to add watch controller: %s\n", err)
 		return err
 	}
 
+	// This is for reflashing.
 	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
 		OwnerType:    &acclrv1beta1.OctNic{},
 	})
 	if err != nil {
-		fmt.Printf("Failed to add watch controller: %s\n", err)
+		xlog.Printf("Failed to add watch controller: %s\n", err)
 		return err
 	}
 
@@ -617,7 +613,7 @@ func (r *OctNicReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		OwnerType:    &acclrv1beta1.OctNic{},
 	})
 	if err != nil {
-		fmt.Printf("Failed to add watch controller: %s\n", err)
+		xlog.Printf("Failed to add watch controller: %s\n", err)
 		return err
 	}
 	return nil

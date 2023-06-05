@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	xlog "log"
 	//yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 	"net/http"
 	//yaml "gopkg.in/yaml.v3"
@@ -74,11 +75,17 @@ func postAcclr(PodIP string, d DevState) (DevState, error) {
 	ds := DevState{}
 	defer r.Body.Close()
 	data, err := io.ReadAll(r.Body)
-	err = json.Unmarshal(data, &ds)
 	if err != nil {
+		xlog.Printf("-----> restA: %s\n", err)
 		return DevState{}, err
 	}
-	//fmt.Printf("-----> %d, %+v\n", len(data), ds)
+
+	err = json.Unmarshal(data, &ds)
+	if err != nil {
+		xlog.Printf("-----> restA: %s\n", err)
+		return DevState{}, err
+	}
+	xlog.Printf("-----> restA: ds.PfDriver %s ds.Status: %s\n", ds.PfDriver, ds.Status)
 
 	return ds, err
 }
